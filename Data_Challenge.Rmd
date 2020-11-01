@@ -1,0 +1,339 @@
+---
+title: "R Notebook"
+output:
+  word_document: default
+  pdf_document: default
+  html_notebook: default
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+```{r}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library("tidyverse")
+library("tidymodels")
+library("plotly")
+library("skimr")
+library("lubridate")
+library("broom")
+```
+
+
+
+```{r}
+post <- read_csv("t1_user_active_min.csv")
+user_variant <- read_csv("t2_user_variant.csv")
+pre <- read_csv("t3_user_active_min_pre.csv")
+user_attr <- read_csv("t4_user_attributes.csv")
+
+```
+```{r}
+skim(post)
+```
+```{r}
+plot1 <- 
+  post %>% 
+    ggplot(aes(x="", y=active_mins))+geom_boxplot()
+
+plot1
+```
+By definition, active minutes is the number of minutes, the user has been active on the application. It is not possible for a user to be active for more than 1440 minutes each day. Here, the active minute value went out to be 1000000 minutes which could be due to typing error, thus making it an outlier.
+
+Removing outliers using IQR
+```{r}
+Q <- quantile(post$active_mins, probs=c(.25, .75), na.rm = FALSE)
+iqr <- IQR(post$active_mins)
+up <-  Q[2]+1.5*iqr # Upper Range  
+low<- Q[1]-1.5*iqr # Lower Range
+eliminated_post<- subset(post, post$active_mins > (Q[1] - 1.5*iqr) & post$active_mins < (Q[2]+1.5*iqr))
+eliminated_post
+```
+
+```{r}
+skim(eliminated_post)
+```
+```{r}
+plot2 <- 
+  eliminated_post %>% 
+    ggplot(aes(x="", y=active_mins))+geom_boxplot()
+
+plot2
+```
+
+
+```{r}
+skim(user_variant)
+```
+
+
+We drop dt because it is the same for all rows
+
+
+```{r}
+user_variant <- subset (user_variant, select = -dt) 
+user_variant
+```
+
+
+```{r}
+post_and_variant <-
+  eliminated_post %>% 
+  inner_join(user_variant, by='uid')
+post_and_variant
+```
+
+H0 - The new UI does not increase user engagement
+T-Test
+
+
+
+```{r}
+mean <- aggregate(post_and_variant$active_mins, by = list(post_and_variant$variant_number == 1), FUN=mean)
+mean
+sd <- sd(post_and_variant$active_mins)
+sd
+```
+```{r}
+effect_size <- (8.67-7.48)/(8.54)
+effect_size
+```
+
+Key Assumptions:
+1. Sampling is done randomly.
+2. Adequacy of sample size.
+```{r}
+# Power Analysis
+# Load package to run power analysis
+library("pwr")
+
+# Run power analysis for t-test
+sample_size <- pwr.t.test(d = effect_size,
+                          sig.level = 0.05,
+                          power = 0.8)
+sample_size
+```
+Our sample size need to be a minimum of 809.42
+
+```{r}
+sampled_trt <- subset(post_and_variant, variant_number == 1)
+sampled_trt
+sampled_ctl <- subset(post_and_variant, variant_number == 0)
+sampled_ctl
+```
+We reduce our control group size to get 50% control group and 50% treatment group.
+```{r}
+sampled_ctl <- sampled_ctl %>% slice(-c(154062 : 777890))
+sampled_ctl
+```
+```{r}
+sampled_ctl_and_trt <- rbind(sampled_ctl, sampled_trt)
+sampled_ctl_and_trt
+```
+
+We perform Welch two-sample test due to having unequal variance check using f-test
+```{r}
+ab_experiment_results <- t.test(active_mins ~ variant_number, conf.level = 0.95, paired = 0, 
+                                data = sampled_ctl_and_trt)
+ab_experiment_results
+```
+Our p-value is 0.05 significance level which is why we reject the null hypothesis. Thus, we can say that the new UI increases user engagement.
+
+```{r}
+user_variant_trt <- subset(user_variant, variant_number != 0)
+user_variant_trt
+```
+```{r}
+post_experiment_trt <-
+  eliminated_post %>% 
+  inner_join(user_variant_trt, by='uid')
+post_experiment_trt
+```
+```{r}
+Q <- quantile(pre$active_mins, probs=c(.25, .75), na.rm = FALSE)
+iqr <- IQR(pre$active_mins)
+up <-  Q[2]+1.5*iqr # Upper Range  
+low <- Q[1]-1.5*iqr # Lower Range
+eliminated_pre<- subset(pre, pre$active_mins > (Q[1] - 1.5*iqr) & pre$active_mins < (Q[2]+1.5*iqr))
+eliminated_pre
+```
+```{r}
+plot3 <- 
+  eliminated_pre %>% 
+    ggplot(aes(x="", y=active_mins))+geom_boxplot()
+
+plot3
+```
+```{r}
+pre_experiment_trt <-
+  eliminated_pre %>% 
+  inner_join(user_variant_trt, by='uid')
+pre_experiment_trt <- pre_experiment_trt %>% slice(-c(154062 : 180267))
+pre_experiment_trt
+```
+```{r}
+experiment_trt <- rbind(pre_experiment_trt, post_experiment_trt)
+experiment_trt
+```
+```{r}
+experiment_trt$date_category <- ifelse(experiment_trt$dt <= "2019-02-06", 0, 1)
+experiment_trt
+```
+
+```{r}
+ab_experiment_results_trt <- t.test(active_mins ~ date_category, conf.level = 0.95,
+                                data = experiment_trt)
+ab_experiment_results_trt
+```
+
+
+```{r}
+skim(user_attr)
+```
+
+```{r}
+pre_mean_time_month <- eliminated_pre %>%
+  group_by(month(dt)) %>%
+  summarize(average_time = mean(active_mins))
+pre_mean_time_month
+```
+
+Plotting conversion rate seasonality
+
+```{r}
+pre_mean_time_week <- eliminated_pre %>%
+  group_by(week(dt)) %>%
+  summarize(average_time = mean(active_mins))
+
+# Build plot
+ggplot(pre_mean_time_week, aes(x = `week(dt)`,
+                          y = average_time)) +
+  geom_point() +
+  geom_line()
+```
+
+```{r}
+post_mean_time_month <- post_and_variant %>%
+  group_by(month(dt), variant_number) %>%
+  summarize(average_time = mean(active_mins))
+post_mean_time_month
+```
+
+
+Plotting conversion rate seasonality
+
+```{r}
+post_mean_time_week <- post_and_variant %>%
+  group_by(week(dt), variant_number) %>%
+  summarize(average_time = mean(active_mins))
+post_mean_time_week
+# Build plot
+ggplot(post_mean_time_week, aes(x = `week(dt)`,
+                          y = average_time, color = variant_number, group = variant_number)) +
+  geom_point() +
+  geom_line()
+```
+
+```{r}
+# Compare ratios for treatment vs. control based on attributes
+attr_and_variant <- sampled_ctl_and_trt %>%
+  inner_join(user_attr, by="uid")
+attr_and_variant
+```
+```{r}
+attr_post_experiment_ctl <- sampled_ctl %>%
+  inner_join(user_attr, by="uid")
+attr_post_experiment_ctl
+```
+```{r}
+cols_to_factor <- c('gender', 'user_type')
+
+attr_post_experiment_ctl <- attr_post_experiment_ctl %>%
+  mutate_at(cols_to_factor, ~factor(.))
+attr_post_experiment_ctl
+summary(attr_post_experiment_ctl)
+```
+
+```{r}
+attr_post_experiment_trt <- post_experiment_trt %>%
+  inner_join(user_attr, by="uid")
+attr_post_experiment_trt
+```
+
+```{r}
+cols_to_factor <- c('gender', 'user_type')
+
+attr_post_experiment_trt <- attr_post_experiment_trt %>%
+  mutate_at(cols_to_factor, ~factor(.))
+attr_post_experiment_trt
+summary(attr_post_experiment_trt)
+```
+```{r}
+
+ggplot(data = attr_post_experiment_ctl) +
+  geom_bar(mapping = aes(x = gender))
+```
+
+```{r}
+ggplot(data = attr_post_experiment_trt) +
+  geom_bar(mapping = aes(x = gender))
+```
+```{r}
+ggplot(data = attr_post_experiment_ctl) +
+  geom_bar(mapping = aes(x = user_type))
+```
+
+```{r}
+ggplot(data = attr_post_experiment_trt) +
+  geom_bar(mapping = aes(x = user_type))
+```
+```{r}
+attr_post_experiment_ctl_gender_mean <- attr_post_experiment_ctl %>%
+  group_by(week(dt), gender) %>%
+  summarize(average_time = mean(active_mins))
+attr_post_experiment_ctl_gender_mean
+
+ggplot(attr_post_experiment_ctl_gender_mean, aes(x = `week(dt)`,
+                          y = average_time, color = gender, group = gender)) +
+  geom_point() +
+  geom_line()
+````
+
+```{r}
+attr_post_experiment_trt_gender_mean <- attr_post_experiment_trt %>%
+  group_by(week(dt), gender) %>%
+  summarize(average_time = mean(active_mins))
+attr_post_experiment_trt_gender_mean
+
+ggplot(attr_post_experiment_trt_gender_mean, aes(x = `week(dt)`,
+                          y = average_time, color = gender, group = gender)) +
+  geom_point() +
+  geom_line()
+```
+```{r}
+attr_post_experiment_ctl_user_type_mean <- attr_post_experiment_ctl %>%
+  group_by(week(dt), user_type) %>%
+  summarize(average_time = mean(active_mins))
+attr_post_experiment_ctl_user_type_mean
+
+ggplot(attr_post_experiment_ctl_user_type_mean, aes(x = `week(dt)`,
+                          y = average_time, color = user_type, group = user_type)) +
+  geom_point() +
+  geom_line()
+```
+
+
+```{r}
+
+attr_post_experiment_trt_user_type_mean <- attr_post_experiment_trt %>%
+  group_by(week(dt), user_type) %>%
+  summarize(average_time = mean(active_mins))
+attr_post_experiment_trt_user_type_mean
+
+ggplot(attr_post_experiment_trt_user_type_mean, aes(x = `week(dt)`,
+                          y = average_time, color = user_type, group = user_type)) +
+  geom_point() +
+  geom_line()
+```
+
